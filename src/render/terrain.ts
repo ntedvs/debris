@@ -182,8 +182,12 @@ export function terrainMaterial(data: GroundData) {
     tH1: { value: tex[1]!.bump },
     tH2: { value: tex[2]!.bump },
     tMask: { value: data.mask },
-    tTile: { value: new THREE.Vector3(1 / data.tile, 1 / defs[1]!.tileSize, 1 / defs[2]!.tileSize) },
-    tRough: { value: new THREE.Vector3(defs[0]!.roughness, defs[1]!.roughness, defs[2]!.roughness) },
+    tTile: {
+      value: new THREE.Vector3(1 / data.tile, 1 / defs[1]!.tileSize, 1 / defs[2]!.tileSize),
+    },
+    tRough: {
+      value: new THREE.Vector3(defs[0]!.roughness, defs[1]!.roughness, defs[2]!.roughness),
+    },
     tBump: { value: new THREE.Vector3(defs[0]!.bump, defs[1]!.bump, defs[2]!.bump) },
     tTint: { value: data.tint },
     tGround: { value: new THREE.Vector2(data.size / 2, 1 / data.size) },
@@ -305,7 +309,7 @@ function bladeGeometry() {
   idx.push(top, top + 1, levels * 2)
   const g = new THREE.InstancedBufferGeometry()
   g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3))
-  g.setAttribute("normal", new THREE.Float32BufferAttribute(new Array(pos.length).fill(0), 3))
+  g.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(pos.length), 3))
   g.setIndex(idx)
   return g
 }
@@ -438,7 +442,12 @@ export class GrassField {
     const blade = bladeGeometry()
     const rings = [
       { ...q.near, inner: 0, width: 0.05, height: 0.26 },
-      { ...q.far, inner: q.near.radius, width: 0.05 * (q.far.spacing / q.near.spacing), height: 0.28 },
+      {
+        ...q.far,
+        inner: q.near.radius,
+        width: 0.05 * (q.far.spacing / q.near.spacing),
+        height: 0.28,
+      },
     ]
     for (const ring of rings) {
       const count = Math.ceil((ring.radius * 2) / ring.spacing)

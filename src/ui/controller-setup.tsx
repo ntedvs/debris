@@ -106,14 +106,11 @@ export function ControllerSetup() {
 
   // Calibration: track extremes
   if (gp && calib) {
-    let changed = false
-    const min = [...calib.min]
-    const max = [...calib.max]
-    gp.axes.forEach((v, i) => {
-      if (v < (min[i] ?? Infinity)) ((min[i] = v), (changed = true))
-      if (v > (max[i] ?? -Infinity)) ((max[i] = v), (changed = true))
-    })
-    if (changed) queueMicrotask(() => setCalib({ min, max }))
+    const ext = (f: typeof Math.min, a: number[]) => gp.axes.map((v, i) => f(v, a[i] ?? v))
+    const min = ext(Math.min, calib.min)
+    const max = ext(Math.max, calib.max)
+    if (min.some((v, i) => v !== calib.min[i]) || max.some((v, i) => v !== calib.max[i]))
+      queueMicrotask(() => setCalib({ min, max }))
   }
 
   const startDetect = (target: StickName | "arm" | "reset") => {

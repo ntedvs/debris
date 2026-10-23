@@ -193,7 +193,10 @@ const PRESETS: Record<string, PresetDef> = {
       const fine = n(x, y, 64, 3, 24)
       const c = mix([96, 90, 82], [140, 134, 124], big)
       const k = (0.8 + fine * 0.35) * (1 - crack * 0.55)
-      return [[c[0] * k, c[1] * k * 0.99, c[2] * k * 0.97], big * 0.5 + fine * 0.3 - crack * 0.6 + 0.4]
+      return [
+        [c[0] * k, c[1] * k * 0.99, c[2] * k * 0.97],
+        big * 0.5 + fine * 0.3 - crack * 0.6 + 0.4,
+      ]
     },
   },
 }

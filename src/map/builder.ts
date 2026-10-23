@@ -653,11 +653,10 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     } else {
       const verts = baked()
       const c = new THREE.Vector3()
-      for (let i = 0; i < verts.length; i += 3)
-        ((c.x += verts[i]!), (c.y += verts[i + 1]!), (c.z += verts[i + 2]!))
+      const v = new THREE.Vector3()
+      for (let i = 0; i < verts.length; i += 3) c.add(v.fromArray(verts, i))
       c.divideScalar(verts.length / 3)
-      for (let i = 0; i < verts.length; i += 3)
-        ((verts[i]! -= c.x), (verts[i + 1]! -= c.y), (verts[i + 2]! -= c.z))
+      for (let i = 0; i < verts.length; i += 3) v.fromArray(verts, i).sub(c).toArray(verts, i)
       addShape(new rapier.ConvexPolyhedron(verts, null), c, { x: 0, y: 0, z: 0, w: 1 })
     }
   }
@@ -671,8 +670,11 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
   // Big batches are split into spatial chunks so the camera and each shadow
   // cascade can frustum cull them instead of drawing the whole map.
   const CHUNK = 80
-  const drawBatches: { geo: THREE.BufferGeometry; mat: THREE.Material; matrices: THREE.Matrix4[] }[] =
-    []
+  const drawBatches: {
+    geo: THREE.BufferGeometry
+    mat: THREE.Material
+    matrices: THREE.Matrix4[]
+  }[] = []
   for (const b of batches.values()) {
     if (b.matrices.length <= 24) {
       drawBatches.push(b)

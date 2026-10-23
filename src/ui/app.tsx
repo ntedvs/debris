@@ -5,9 +5,9 @@ import { parseMap, type MapFile } from "../map/schema"
 import { QUADS } from "../sim/quads"
 import { settings, useSettings, type ViewMode } from "../settings"
 import type { GraphicsQuality } from "../render/scene"
-import { ControllerSetup } from "./ControllerSetup"
-import { Osd } from "./Osd"
-import { RatesEditor } from "./RatesEditor"
+import { ControllerSetup } from "./controller-setup"
+import { Osd } from "./osd"
+import { RatesEditor } from "./rates-editor"
 
 const CUSTOM_KEY = "debris.customMap"
 
