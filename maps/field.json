@@ -1,0 +1,367 @@
+{
+  "format": "debris-map",
+  "version": 1,
+  "name": "Field",
+  "author": "Debris",
+  "description": "Open field with a concrete bando, container yard, pipes, gaps and a tower to dive.",
+  "environment": {
+    "sky": { "preset": "day", "sunElevation": 42, "sunAzimuth": 145 },
+    "fog": { "density": 0.0022 },
+    "ground": {
+      "size": 600,
+      "material": "grass",
+      "hills": { "height": 22, "scale": 80, "flatRadius": 95, "seed": 7 }
+    },
+    "wind": { "speed": 2, "direction": 250, "gust": 0.5 }
+  },
+  "spawns": [
+    { "position": [0, 0.05, 0], "yaw": 0 },
+    { "position": [42.5, 5.2, -10], "yaw": 90 },
+    { "position": [-40, 24.5, -70], "yaw": -90 }
+  ],
+  "objects": [
+    {
+      "type": "box",
+      "id": "launch pad",
+      "position": [0, 0, 0],
+      "size": [4, 0.05, 4],
+      "material": "concrete"
+    },
+    {
+      "type": "box",
+      "id": "path",
+      "position": [0, 0, 30],
+      "size": [3, 0.02, 56],
+      "material": "dirt"
+    },
+    {
+      "type": "box",
+      "id": "road",
+      "position": [-24, 0, 0],
+      "size": [8, 0.03, 190],
+      "material": "asphalt"
+    },
+    {
+      "type": "array",
+      "id": "street lights",
+      "count": 10,
+      "position": [-29, 0, -85],
+      "offset": [0, 0, 19],
+      "object": { "type": "prefab", "prefab": "lamppost", "rotation": [0, 90, 0] }
+    },
+
+    {
+      "type": "group",
+      "id": "bando",
+      "position": [0, 0, -45],
+      "children": [
+        { "type": "box", "position": [0, 0, 0], "size": [18, 0.3, 11], "material": "concrete" },
+        {
+          "type": "array",
+          "count": 5,
+          "position": [-8, 0.3, -5],
+          "offset": [4, 0, 0],
+          "object": { "type": "box", "size": [0.45, 3.4, 0.45], "material": "concrete" }
+        },
+        {
+          "type": "array",
+          "count": 5,
+          "position": [-8, 0.3, 5],
+          "offset": [4, 0, 0],
+          "object": { "type": "box", "size": [0.45, 3.4, 0.45], "material": "concrete" }
+        },
+        {
+          "type": "box",
+          "id": "slab left",
+          "position": [-5.5, 3.7, 0],
+          "size": [7, 0.3, 11],
+          "material": "concrete"
+        },
+        {
+          "type": "box",
+          "id": "slab right",
+          "position": [5.5, 3.7, 0],
+          "size": [7, 0.3, 11],
+          "material": "concrete"
+        },
+        {
+          "type": "array",
+          "count": 3,
+          "position": [-8, 4.0, -5],
+          "offset": [3.5, 0, 0],
+          "object": { "type": "box", "size": [0.45, 3.2, 0.45], "material": "concrete" }
+        },
+        {
+          "type": "array",
+          "count": 3,
+          "position": [-8, 4.0, 5],
+          "offset": [3.5, 0, 0],
+          "object": { "type": "box", "size": [0.45, 3.2, 0.45], "material": "concrete" }
+        },
+        {
+          "type": "box",
+          "id": "roof",
+          "position": [-4.5, 7.2, 0],
+          "size": [9, 0.3, 11],
+          "material": "concrete"
+        },
+        {
+          "type": "box",
+          "id": "back wall low",
+          "position": [0, 0.3, -5.6],
+          "size": [18, 1.2, 0.25],
+          "material": "brick"
+        },
+        {
+          "type": "box",
+          "position": [-6.5, 1.5, -5.6],
+          "size": [5, 2.2, 0.25],
+          "material": "brick"
+        },
+        {
+          "type": "box",
+          "position": [6.5, 1.5, -5.6],
+          "size": [5, 2.2, 0.25],
+          "material": "brick"
+        },
+        {
+          "type": "box",
+          "id": "side wall",
+          "position": [9, 0.3, 0],
+          "size": [0.25, 3.4, 11],
+          "material": { "preset": "plaster", "color": "#b8b0a0" }
+        },
+        {
+          "type": "box",
+          "id": "stairs block",
+          "position": [-11, 0, 3],
+          "size": [3, 1.2, 4],
+          "material": "concrete"
+        },
+        { "type": "prefab", "prefab": "pallet", "position": [3, 0.3, 2] },
+        { "type": "prefab", "prefab": "pallet", "position": [3, 0.45, 2], "rotation": [0, 12, 0] },
+        { "type": "prefab", "prefab": "barrel", "position": [-2, 0.3, 3.5] },
+        { "type": "prefab", "prefab": "barrel", "position": [-1.3, 0.3, 3.9], "color": "#2b5d8a" },
+        { "type": "prefab", "prefab": "barrel", "position": [12, 0, -2], "color": "#4d6b2f" },
+        { "type": "prefab", "prefab": "tire", "position": [13, 0, 1], "rotation": [0, 30, 0] }
+      ]
+    },
+
+    {
+      "type": "group",
+      "id": "container yard",
+      "position": [40, 0, -10],
+      "children": [
+        { "type": "prefab", "prefab": "container", "position": [0, 0, 0], "color": "#8e2f24" },
+        { "type": "prefab", "prefab": "container", "position": [5, 0, 0], "color": "#2f6f9f" },
+        { "type": "prefab", "prefab": "container", "position": [2.5, 2.59, 0], "color": "#c48a1e" },
+        {
+          "type": "prefab",
+          "prefab": "container",
+          "position": [-6, 0, 8],
+          "rotation": [0, 90, 0],
+          "color": "#3d7d4a"
+        },
+        {
+          "type": "prefab",
+          "prefab": "container",
+          "position": [-6, 2.59, 8],
+          "rotation": [0, 90, 0],
+          "color": "#6e6e72"
+        },
+        {
+          "type": "prefab",
+          "prefab": "container",
+          "position": [8, 0, 12],
+          "rotation": [0, 15, 0],
+          "color": "#2f6f9f"
+        },
+        {
+          "type": "prefab",
+          "prefab": "container",
+          "position": [12, 0, -4],
+          "rotation": [0, -8, 0],
+          "color": "#7a2a5b"
+        },
+        {
+          "type": "prefab",
+          "prefab": "container",
+          "position": [16, 0, -4],
+          "rotation": [0, -8, 0],
+          "color": "#8e2f24"
+        },
+        {
+          "type": "prefab",
+          "prefab": "container",
+          "position": [14, 2.59, -4.3],
+          "rotation": [0, -8, 0],
+          "color": "#c48a1e"
+        },
+        { "type": "prefab", "prefab": "barrier", "position": [-2, 0, 14], "rotation": [0, 90, 0] },
+        { "type": "prefab", "prefab": "barrier", "position": [2, 0, 14], "rotation": [0, 90, 0] }
+      ]
+    },
+
+    {
+      "type": "group",
+      "id": "pipes",
+      "position": [-8, 0, 28],
+      "children": [
+        {
+          "type": "pipe",
+          "position": [0, 0, 0],
+          "rotation": [0, 90, 0],
+          "radius": 1.1,
+          "thickness": 0.14,
+          "length": 3,
+          "material": "concrete"
+        },
+        {
+          "type": "pipe",
+          "position": [0, 0, 4],
+          "rotation": [0, 90, 0],
+          "radius": 1.1,
+          "thickness": 0.14,
+          "length": 3,
+          "material": "concrete"
+        },
+        {
+          "type": "pipe",
+          "position": [0, 2.2, 2],
+          "rotation": [0, 90, 0],
+          "radius": 1.1,
+          "thickness": 0.14,
+          "length": 3,
+          "material": "concrete"
+        },
+        { "type": "ramp", "position": [6, 0, 2], "size": [3, 1.5, 4], "material": "wood" }
+      ]
+    },
+
+    {
+      "type": "frame",
+      "id": "gap 1",
+      "position": [12, 0, 18],
+      "rotation": [0, 30, 0],
+      "width": 2.2,
+      "height": 1.6,
+      "thickness": 0.12,
+      "material": { "preset": "painted", "color": "#e04a1f" }
+    },
+    {
+      "type": "frame",
+      "id": "gap 2",
+      "position": [22, 0, 32],
+      "rotation": [0, 60, 0],
+      "width": 1.6,
+      "height": 1.2,
+      "thickness": 0.12,
+      "material": { "preset": "painted", "color": "#f0c020" }
+    },
+    {
+      "type": "ring",
+      "id": "ring",
+      "position": [-14, 4, -12],
+      "rotation": [0, 70, 0],
+      "radius": 1.3,
+      "tube": 0.1,
+      "material": { "preset": "painted", "color": "#20a0e0" }
+    },
+    {
+      "type": "cylinder",
+      "position": [-14, 0, -12],
+      "radius": 0.08,
+      "height": 2.6,
+      "material": "metal"
+    },
+
+    {
+      "type": "prefab",
+      "id": "tower",
+      "prefab": "building",
+      "position": [-40, 0, -70],
+      "size": [8, 24, 8],
+      "color": "#a9a196"
+    },
+    {
+      "type": "prefab",
+      "prefab": "building",
+      "position": [-52, 0, -48],
+      "size": [14, 9, 10],
+      "color": "#cfc6b5"
+    },
+
+    {
+      "type": "array",
+      "id": "power line",
+      "count": 9,
+      "position": [70, 0, -100],
+      "offset": [0, 0, 25],
+      "object": { "type": "prefab", "prefab": "pole" }
+    },
+
+    {
+      "type": "group",
+      "id": "tree line",
+      "children": [
+        { "type": "prefab", "prefab": "tree", "position": [16, 0, -28], "scale": 1.3 },
+        { "type": "prefab", "prefab": "tree", "position": [22, 0, -32], "scale": 1.1, "seed": 3 },
+        { "type": "prefab", "prefab": "tree", "position": [-16, 0, 14], "scale": 1.2, "seed": 5 },
+        { "type": "prefab", "prefab": "pine", "position": [-12, 0, 6], "scale": 1.4 },
+        { "type": "prefab", "prefab": "pine", "position": [-10, 0, 18], "scale": 1.1, "seed": 2 },
+        { "type": "prefab", "prefab": "bush", "position": [6, 0, 10] },
+        { "type": "prefab", "prefab": "bush", "position": [-5, 0, -18], "seed": 2 }
+      ]
+    },
+    {
+      "type": "scatter",
+      "id": "forest",
+      "count": 260,
+      "center": [0, 0, 0],
+      "size": [420, 420],
+      "seed": 11,
+      "scaleRange": [0.8, 1.6],
+      "avoid": [
+        { "center": [0, 0, -20], "radius": 75 },
+        { "center": [45, 0, 0], "radius": 35 }
+      ],
+      "object": { "type": "prefab", "prefab": "pine" }
+    },
+    {
+      "type": "scatter",
+      "count": 160,
+      "center": [0, 0, 0],
+      "size": [360, 360],
+      "seed": 12,
+      "scaleRange": [0.9, 1.5],
+      "avoid": [
+        { "center": [0, 0, -20], "radius": 70 },
+        { "center": [45, 0, 0], "radius": 35 }
+      ],
+      "object": { "type": "prefab", "prefab": "tree" }
+    },
+    {
+      "type": "scatter",
+      "count": 60,
+      "center": [0, 0, 0],
+      "size": [300, 300],
+      "seed": 13,
+      "scaleRange": [0.5, 1.6],
+      "avoid": [{ "center": [0, 0, 0], "radius": 25 }],
+      "object": { "type": "prefab", "prefab": "rock" }
+    },
+    {
+      "type": "scatter",
+      "count": 80,
+      "center": [0, 0, 0],
+      "size": [200, 200],
+      "seed": 14,
+      "scaleRange": [0.6, 1.3],
+      "avoid": [
+        { "center": [0, 0, 0], "radius": 12 },
+        { "center": [0, 0, -45], "radius": 14 }
+      ],
+      "object": { "type": "prefab", "prefab": "bush" }
+    }
+  ]
+}

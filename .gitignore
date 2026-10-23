@@ -1,0 +1,7 @@
+node_modules
+dist
+.DS_Store
+public/map.schema.json
+public/map-format.md
+public/maps
+scratch
