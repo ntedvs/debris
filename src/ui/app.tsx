@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { Game, type GameStatus } from "../game"
-import { BUILTIN_MAPS } from "../map/maps"
+import { BUILTIN_MAPS, type MapEntry } from "../map/maps"
 import { parseMap, type MapFile } from "../map/schema"
 import { QUADS } from "../sim/quads"
 import { settings, useSettings, type ViewMode } from "../settings"
@@ -9,22 +9,36 @@ import { ControllerSetup } from "./controller-setup"
 import { Osd } from "./osd"
 import { RatesEditor } from "./rates-editor"
 
-const CUSTOM_KEY = "debris.customMap"
+const CUSTOM_KEY = "debris.customMaps"
+const LEGACY_CUSTOM_KEY = "debris.customMap"
 
-function loadCustom(): MapFile | null {
+type StoredMap = { id: string; json: unknown }
+
+function readStored(): StoredMap[] {
   try {
     const raw = localStorage.getItem(CUSTOM_KEY)
-    if (!raw) return null
-    const r = parseMap(JSON.parse(raw))
-    return r.ok ? r.map : null
-  } catch {
-    return null
-  }
+    if (raw) return JSON.parse(raw) as StoredMap[]
+    const legacy = localStorage.getItem(LEGACY_CUSTOM_KEY)
+    if (legacy) {
+      const list = [{ id: "custom", json: JSON.parse(legacy) }]
+      localStorage.setItem(CUSTOM_KEY, JSON.stringify(list))
+      localStorage.removeItem(LEGACY_CUSTOM_KEY)
+      return list
+    }
+  } catch {}
+  return []
 }
 
-function resolveMap(id: string, custom: MapFile | null): MapFile {
-  if (id === "custom" && custom) return custom
-  return (BUILTIN_MAPS.find((m) => m.id === id) ?? BUILTIN_MAPS[0]!).map
+function loadCustom(): MapEntry[] {
+  return readStored().flatMap((s) => {
+    const r = parseMap(s.json)
+    return r.ok ? [{ id: s.id, map: r.map }] : []
+  })
+}
+
+function resolveMap(id: string, custom: MapEntry[]): MapFile {
+  const all = [...BUILTIN_MAPS, ...custom]
+  return (all.find((m) => m.id === id) ?? BUILTIN_MAPS[0]!).map
 }
 
 type Tab = "fly" | "controller" | "rates" | "settings" | "maps"
@@ -35,7 +49,7 @@ export function App() {
   const [status, setStatus] = useState<GameStatus | null>(null)
   const [menu, setMenu] = useState(true)
   const [tab, setTab] = useState<Tab>("fly")
-  const [custom, setCustom] = useState<MapFile | null>(loadCustom)
+  const [custom, setCustom] = useState<MapEntry[]>(loadCustom)
   const [mapErrors, setMapErrors] = useState<string[] | null>(null)
   const [loading, setLoading] = useState(true)
   const s = useSettings()
@@ -43,6 +57,8 @@ export function App() {
   useEffect(() => {
     const game = new Game(canvasRef.current!)
     gameRef.current = game
+    // Handle for poking at the scene from devtools
+    if (import.meta.env.DEV) (window as unknown as { game: Game }).game = game
     game.onStatus = setStatus
     game.init(resolveMap(settings.get().mapId, loadCustom())).then(() => setLoading(false))
     const unsub = settings.subscribe(() => game.applySettings(settings.get()))
@@ -83,9 +99,22 @@ export function App() {
       setMapErrors(r.errors)
       return
     }
-    localStorage.setItem(CUSTOM_KEY, JSON.stringify(json))
-    setCustom(r.map)
-    selectMap("custom", r.map)
+    // Reloading a map with the same name replaces it, so iterating on a file doesn't pile up copies.
+    const stored = readStored()
+    const existing = custom.find((c) => c.map.name === r.map.name)
+    const id = existing?.id ?? `custom-${Date.now().toString(36)}`
+    const next = existing
+      ? stored.map((s) => (s.id === id ? { id, json } : s))
+      : [...stored, { id, json }]
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(next))
+    setCustom(loadCustom())
+    selectMap(id, r.map)
+  }
+
+  const deleteMap = (id: string) => {
+    localStorage.setItem(CUSTOM_KEY, JSON.stringify(readStored().filter((s) => s.id !== id)))
+    setCustom(loadCustom())
+    if (settings.get().mapId === id) selectMap(BUILTIN_MAPS[0]!.id, BUILTIN_MAPS[0]!.map)
   }
 
   const onDrop = (e: React.DragEvent) => {
@@ -143,6 +172,7 @@ export function App() {
                   custom={custom}
                   errors={mapErrors}
                   onSelect={selectMap}
+                  onDelete={deleteMap}
                   onFile={loadFile}
                   onReset={() => {
                     gameRef.current?.reset()
@@ -164,34 +194,48 @@ export function App() {
 
 function FlyTab(props: {
   mapId: string
-  custom: MapFile | null
+  custom: MapEntry[]
   errors: string[] | null
   onSelect: (id: string, map: MapFile) => void
+  onDelete: (id: string) => void
   onFile: (f: File) => void
   onReset: () => void
 }) {
   const s = useSettings()
   const fileRef = useRef<HTMLInputElement>(null)
-  const entries = [...BUILTIN_MAPS, ...(props.custom ? [{ id: "custom", map: props.custom }] : [])]
+  const customIds = new Set(props.custom.map((c) => c.id))
+  const entries = [...BUILTIN_MAPS, ...props.custom]
   return (
     <div className="space-y-6">
       <section className="space-y-2">
         <h3 className="font-semibold">Map</h3>
         <div className="grid grid-cols-2 gap-2">
           {entries.map((e) => (
-            <button
-              key={e.id}
-              onClick={() => props.onSelect(e.id, e.map)}
-              className={`rounded-lg border p-3 text-left ${props.mapId === e.id ? "border-sky-400 bg-sky-400/10" : "border-white/10 hover:bg-white/5"}`}
-            >
-              <div className="font-medium">
-                {e.map.name}
-                {e.id === "custom" && <span className="ml-2 text-xs text-white/50">custom</span>}
-              </div>
-              {e.map.description && (
-                <div className="mt-1 text-xs text-white/60">{e.map.description}</div>
+            <div key={e.id} className="relative">
+              <button
+                onClick={() => props.onSelect(e.id, e.map)}
+                className={`h-full w-full rounded-lg border p-3 text-left ${props.mapId === e.id ? "border-sky-400 bg-sky-400/10" : "border-white/10 hover:bg-white/5"}`}
+              >
+                <div className="pr-6 font-medium">
+                  {e.map.name}
+                  {customIds.has(e.id) && (
+                    <span className="ml-2 text-xs text-white/50">custom</span>
+                  )}
+                </div>
+                {e.map.description && (
+                  <div className="mt-1 text-xs text-white/60">{e.map.description}</div>
+                )}
+              </button>
+              {customIds.has(e.id) && (
+                <button
+                  title="Delete map"
+                  onClick={() => confirm(`Delete "${e.map.name}"?`) && props.onDelete(e.id)}
+                  className="absolute top-2 right-2 rounded px-1.5 text-white/40 hover:bg-white/10 hover:text-red-300"
+                >
+                  ✕
+                </button>
               )}
-            </button>
+            </div>
           ))}
         </div>
         <div className="flex items-center gap-3 pt-1">
@@ -207,7 +251,10 @@ function FlyTab(props: {
             type="file"
             accept=".json,application/json"
             className="hidden"
-            onChange={(e) => e.target.files?.[0] && props.onFile(e.target.files[0])}
+            onChange={(e) => {
+              if (e.target.files?.[0]) props.onFile(e.target.files[0])
+              e.target.value = ""
+            }}
           />
         </div>
         {props.errors && (
@@ -389,6 +436,15 @@ function SettingsTab() {
             onChange={(e) => settings.set({ shadows: e.target.checked })}
           />{" "}
           Shadows
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={s.cameraEffects}
+            onChange={(e) => settings.set({ cameraEffects: e.target.checked })}
+          />{" "}
+          Camera effects
+          <span className="text-xs text-white/50">fisheye lens, motion blur, sensor noise</span>
         </label>
       </section>
       <button

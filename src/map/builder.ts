@@ -4,6 +4,15 @@ import type RAPIER from "@dimforge/rapier3d-compat"
 import { getMaterial, solidMaterial } from "../render/materials"
 import { patchTree } from "../render/shading"
 import {
+  barkMaterial,
+  LOD_DISTANCE,
+  leafMaterial,
+  VARIANTS,
+  vegetationGeometry,
+  vegetationInfo,
+  type Species,
+} from "../render/vegetation"
+import {
   buildGroundData,
   terrainMaterial,
   type Footprint,
@@ -22,6 +31,7 @@ type GeoDesc =
   | { kind: "ramp"; size: [number, number, number] }
   | { kind: "pipe"; r: number; t: number; len: number }
   | { kind: "ring"; r: number; tube: number }
+  | { kind: "veg"; species: Species; variant: number; lod: number; layer: "bark" | "leaves" }
 
 type Part = {
   geo: GeoDesc
@@ -30,6 +40,12 @@ type Part = {
   collide: boolean
   /** Use a simpler collider than the visual shape (e.g. foliage as ball). */
   collider?: "ball" | "hull"
+  /** Collision and ground footprint only, never drawn. */
+  hidden?: boolean
+  /** Set false to keep this part from clearing grass and wearing the ground. */
+  footprint?: boolean
+  /** Low detail geometry drawn beyond LOD_DISTANCE. */
+  far?: GeoDesc
 }
 
 export type BuiltMap = {
@@ -39,6 +55,8 @@ export type BuiltMap = {
   map: MapFile
   ground: GroundData
   stats: { parts: number; drawCalls: number; colliders: number }
+  /** Per-frame upkeep that depends on the camera, e.g. vegetation LOD. */
+  update: (camera: THREE.Vector3) => void
 }
 
 const DEG = Math.PI / 180
@@ -159,6 +177,10 @@ function buildGeometry(d: GeoDesc): THREE.BufferGeometry {
       scaleUvs(g, 2 * Math.PI * d.r, 2 * Math.PI * d.tube)
       return g
     }
+    case "veg": {
+      const g = vegetationGeometry(d.species, d.variant, d.lod)
+      return d.layer === "bark" ? g.bark! : g.leaves
+    }
   }
 }
 
@@ -170,8 +192,9 @@ type Ctx = {
 }
 
 const BARK = () => solidMaterial("#4b3a2a", 0.95)
-const LEAVES = ["#3f5a26", "#4a6a2c", "#365022", "#56702f"]
-const PINE = ["#2b4424", "#31502a", "#28401f"]
+// Leaf texture tints. The textures carry their own light and dark variation.
+const LEAVES = ["#5f7d34", "#6e8a3a", "#56742f", "#7a8f3c"]
+const PINE = ["#3f5a34", "#46613a", "#3a5230"]
 
 function prefabParts(obj: Extract<MapObject, { type: "prefab" }>, m: THREE.Matrix4, ctx: Ctx) {
   const seed = obj.seed ?? Math.floor(Math.abs(m.elements[12]! * 13.1 + m.elements[14]! * 7.7))
@@ -187,66 +210,47 @@ function prefabParts(obj: Extract<MapObject, { type: "prefab" }>, m: THREE.Matri
   const at = (x: number, y: number, z: number, ry = 0) => transform([x, y, z], [0, ry, 0])
 
   switch (obj.prefab) {
-    case "tree": {
-      add(
-        { kind: "cylinder", r: 0.2, rt: 0.12, h: 3.2, seg: 8, worldUv: false },
-        BARK(),
-        at(0, 0, 0),
-      )
-      const leaf = solidMaterial(obj.color ?? LEAVES[variant]!, 0.9, 0, true)
-      const blobs: [number, number, number, number][] = [
-        [0, 3.8, 0, 1.9],
-        [0.9, 3.2, 0.3, 1.3],
-        [-0.7, 3.4, -0.6, 1.4],
-        [0.2, 4.8, -0.2, 1.3],
-      ]
-      blobs.forEach(([x, y, z, rad], i) =>
-        add(
-          { kind: "blob", r: rad, detail: 1, seed: variant * 10 + i, squash: 0.85 },
-          leaf,
-          at(x, y, z),
-          "ball",
-        ),
-      )
-      break
-    }
-    case "pine": {
-      add(
-        { kind: "cylinder", r: 0.16, rt: 0.1, h: 2.4, seg: 8, worldUv: false },
-        BARK(),
-        at(0, 0, 0),
-      )
-      const mat = solidMaterial(obj.color ?? PINE[variant % 3]!, 0.9, 0, true)
-      const tiers: [number, number, number][] = [
-        [1.0, 2.0, 2.6],
-        [2.4, 1.55, 2.3],
-        [3.7, 1.1, 2.1],
-        [4.9, 0.7, 1.8],
-      ]
-      tiers.forEach(([y, rad, h]) =>
-        add(
-          { kind: "cylinder", r: rad, rt: 0, h, seg: 9, worldUv: false },
-          mat,
-          at(0, y, 0, r() * 360),
-          "hull",
-        ),
-      )
-      break
-    }
+    case "tree":
+    case "pine":
     case "bush": {
-      const mat = solidMaterial(obj.color ?? LEAVES[(variant + 1) % 4]!, 0.9, 0, true)
-      add(
-        { kind: "blob", r: 0.8, detail: 1, seed: variant, squash: 0.7 },
-        mat,
-        at(0, 0.45, 0),
-        "ball",
-      )
-      add(
-        { kind: "blob", r: 0.6, detail: 1, seed: variant + 5, squash: 0.7 },
-        mat,
-        at(0.6, 0.35, 0.2),
-        "ball",
-      )
+      const species = obj.prefab
+      const v = seed % VARIANTS[species]
+      const info = vegetationInfo(species, v)
+      const palette = species === "pine" ? PINE : LEAVES
+      const veg = (layer: "bark" | "leaves", lod: number): GeoDesc => ({
+        kind: "veg",
+        species,
+        variant: v,
+        lod,
+        layer,
+      })
+      const visual = (layer: "bark" | "leaves", material: THREE.Material) =>
+        ctx.parts.push({
+          geo: veg(layer, 0),
+          far: veg(layer, 1),
+          material,
+          matrix: m.clone(),
+          collide: false,
+          footprint: false,
+        })
+      if (species !== "bush") visual("bark", barkMaterial())
+      visual("leaves", leafMaterial(species, obj.color ?? palette[variant % palette.length]!))
+      // Invisible collision: trunk cylinder and a ball per crown
+      const hidden = (geo: GeoDesc, local: THREE.Matrix4, collider?: "ball") =>
+        ctx.parts.push({
+          geo,
+          material: BARK(),
+          matrix: m.clone().multiply(local),
+          collide: obj.collide,
+          collider,
+          hidden: true,
+        })
+      if (info.trunk) {
+        const { radius: tr, height } = info.trunk
+        hidden({ kind: "cylinder", r: tr, rt: tr, h: height, seg: 8, worldUv: false }, at(0, 0, 0))
+      }
+      for (const c of info.crowns)
+        hidden({ kind: "sphere", r: c.radius }, at(c.center.x, c.center.y, c.center.z), "ball")
       break
     }
     case "rock": {
@@ -574,6 +578,15 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     string,
     { geo: THREE.BufferGeometry; mat: THREE.Material; matrices: THREE.Matrix4[] }
   >()
+  const lodBatches = new Map<
+    string,
+    {
+      near: THREE.BufferGeometry
+      far: THREE.BufferGeometry
+      mat: THREE.Material
+      matrices: THREE.Matrix4[]
+    }
+  >()
   const tmpPos = new THREE.Vector3()
   const tmpQuat = new THREE.Quaternion()
   const tmpScale = new THREE.Vector3()
@@ -593,7 +606,7 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     const bb = geo.boundingBox!
     tmpBox.copy(bb).applyMatrix4(part.matrix)
     const gy = groundHeight((tmpBox.min.x + tmpBox.max.x) / 2, (tmpBox.min.z + tmpBox.max.z) / 2)
-    if (tmpBox.min.y < gy + 0.4 && tmpBox.max.y > gy - 0.5) {
+    if (part.footprint !== false && tmpBox.min.y < gy + 0.4 && tmpBox.max.y > gy - 0.5) {
       footprints.push({
         inv: part.matrix.clone().invert(),
         box: bb,
@@ -608,13 +621,26 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
         part.material = decalMaterial(part.material)
     }
 
-    const bk = `${gk}|${part.material.uuid}`
-    let batch = batches.get(bk)
-    if (!batch) {
-      batch = { geo, mat: part.material, matrices: [] }
-      batches.set(bk, batch)
+    if (part.far) {
+      const fk = JSON.stringify(part.far)
+      const lk = `${gk}|${fk}|${part.material.uuid}`
+      let lb = lodBatches.get(lk)
+      if (!lb) {
+        let far = geoCache.get(fk)
+        if (!far) geoCache.set(fk, (far = buildGeometry(part.far)))
+        lb = { near: geo, far, mat: part.material, matrices: [] }
+        lodBatches.set(lk, lb)
+      }
+      lb.matrices.push(part.matrix)
+    } else if (!part.hidden) {
+      const bk = `${gk}|${part.material.uuid}`
+      let batch = batches.get(bk)
+      if (!batch) {
+        batch = { geo, mat: part.material, matrices: [] }
+        batches.set(bk, batch)
+      }
+      batch.matrices.push(part.matrix)
     }
-    batch.matrices.push(part.matrix)
 
     if (!part.collide) continue
     part.matrix.decompose(tmpPos, tmpQuat, tmpScale)
@@ -705,8 +731,52 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     }
     mesh.castShadow = true
     mesh.receiveShadow = true
+    const depth = b.mat.userData.depthMaterial as THREE.Material | undefined
+    if (depth) mesh.customDepthMaterial = depth
     group.add(mesh)
     drawCalls++
+  }
+
+  // LOD sets: one near and one far instanced mesh each, instances moved
+  // between them as the camera moves. Cheaper than per-chunk meshes.
+  const lods = [...lodBatches.values()].map((b) => {
+    const make = (geo: THREE.BufferGeometry) => {
+      const inst = new THREE.InstancedMesh(geo, b.mat, b.matrices.length)
+      inst.count = 0
+      inst.frustumCulled = false
+      inst.castShadow = true
+      inst.receiveShadow = true
+      const depth = b.mat.userData.depthMaterial as THREE.Material | undefined
+      if (depth) inst.customDepthMaterial = depth
+      group.add(inst)
+      drawCalls++
+      return inst
+    }
+    return {
+      near: make(b.near),
+      far: make(b.far),
+      matrices: b.matrices,
+      pos: b.matrices.map((mm) => new THREE.Vector3().setFromMatrixPosition(mm)),
+      range: b.matrices.map((mm) => LOD_DISTANCE * Math.max(1, mm.getMaxScaleOnAxis())),
+    }
+  })
+  const lastCam = new THREE.Vector3(Infinity, 0, 0)
+  const update = (cam: THREE.Vector3) => {
+    if (cam.distanceToSquared(lastCam) < 4) return
+    lastCam.copy(cam)
+    for (const l of lods) {
+      let ni = 0
+      let fi = 0
+      for (let i = 0; i < l.pos.length; i++) {
+        const r = l.range[i]!
+        if (l.pos[i]!.distanceToSquared(cam) < r * r) l.near.setMatrixAt(ni++, l.matrices[i]!)
+        else l.far.setMatrixAt(fi++, l.matrices[i]!)
+      }
+      l.near.count = ni
+      l.far.count = fi
+      l.near.instanceMatrix.needsUpdate = true
+      l.far.instanceMatrix.needsUpdate = true
+    }
   }
 
   const spawns = map.spawns.map((s) => ({
@@ -732,5 +802,6 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     map,
     ground: groundData,
     stats: { parts: ctx.parts.length, drawCalls, colliders },
+    update,
   }
 }

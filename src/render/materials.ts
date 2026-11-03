@@ -180,6 +180,24 @@ const PRESETS: Record<string, PresetDef> = {
     bump: 0,
     paint: () => [[40, 56, 72], 0],
   },
+  // Not exposed in the map format
+  bark: {
+    tileSize: 1.2,
+    roughness: 0.95,
+    metalness: 0,
+    bump: 2,
+    paint: (x, y) => {
+      // Vertical ridges with fissures, u runs around the trunk
+      const warp = n(x, y, 6, 3, 25)
+      const u = x / SIZE
+      const ridge = 0.5 + 0.5 * Math.sin(Math.PI * 2 * (u * 9 + warp * 1.2))
+      const fissure = Math.pow(Math.max(0, Math.sin(Math.PI * 2 * (u * 5 + n(x, y, 4, 3, 26)))), 18)
+      const tone = n(x, y, 4, 3, 27) * 0.7 + n(x, y, 48, 2, 28) * 0.3
+      const c = mix([70, 58, 46], [118, 102, 86], tone)
+      const k = (0.75 + ridge * 0.4) * (1 - fissure * 0.6)
+      return [[c[0] * k, c[1] * k, c[2] * k], ridge * 0.6 - fissure * 0.5 + 0.4]
+    },
+  },
   // Terrain only, not exposed in the map format
   rock: {
     tileSize: 5,

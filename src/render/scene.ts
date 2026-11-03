@@ -2,8 +2,11 @@ import * as THREE from "three"
 import { CSM } from "three/examples/jsm/csm/CSM.js"
 import { Sky } from "three/examples/jsm/objects/Sky.js"
 import {
+  BloomEffect,
+  BrightnessContrastEffect,
   EffectComposer,
   EffectPass,
+  HueSaturationEffect,
   RenderPass,
   SMAAEffect,
   SMAAPreset,
@@ -14,6 +17,7 @@ import { N8AOPostPass } from "n8ao"
 import type { BuiltMap } from "../map/builder"
 import type { MapFile } from "../map/schema"
 import { noiseTexture } from "./noise-texture"
+import { AutoExposureEffect, CameraEffect, type CameraFxParams } from "./post"
 import { installChunks, invalidateMaterials, patchTree, setCascadeCount, shared } from "./shading"
 import { GrassField, type GrassQuality } from "./terrain"
 
@@ -23,11 +27,17 @@ type SkyParams = {
   turbidity: number
   rayleigh: number
   mie: number
+  /**
+   * Sun illuminance. The Sky shader's radiance is around 1 to 4, so a clear
+   * day needs ~55 for a real sun to sky ratio (sunlit about 5x brighter than shade).
+   */
   sunIntensity: number
   sunColor: string
   hemiSky: string
+  /** Average ground albedo, lit by sun and sky, becomes the bounce light in the env map. */
   hemiGround: string
   hemiIntensity: number
+  /** Exposure compensation on top of auto exposure. */
   exposure: number
   fog: string
   /** Height fog falloff per meter. Higher keeps haze closer to the ground. */
@@ -45,12 +55,12 @@ const SKY_PRESETS: Record<MapFile["environment"]["sky"]["preset"], SkyParams> = 
     turbidity: 4,
     rayleigh: 1.2,
     mie: 0.004,
-    sunIntensity: 3.2,
+    sunIntensity: 55,
     sunColor: "#fff4e5",
     hemiSky: "#bcd6ff",
     hemiGround: "#5a5040",
     hemiIntensity: 0.45,
-    exposure: 0.55,
+    exposure: 1,
     fog: "#c3d3e6",
     fogFalloff: 0.01,
     clouds: 0.38,
@@ -63,12 +73,12 @@ const SKY_PRESETS: Record<MapFile["environment"]["sky"]["preset"], SkyParams> = 
     turbidity: 7,
     rayleigh: 2.2,
     mie: 0.006,
-    sunIntensity: 2.6,
+    sunIntensity: 40,
     sunColor: "#ffc488",
     hemiSky: "#ffd7b0",
     hemiGround: "#4a3a2a",
     hemiIntensity: 0.4,
-    exposure: 0.5,
+    exposure: 1,
     fog: "#e3c4a2",
     fogFalloff: 0.014,
     clouds: 0.3,
@@ -81,12 +91,12 @@ const SKY_PRESETS: Record<MapFile["environment"]["sky"]["preset"], SkyParams> = 
     turbidity: 18,
     rayleigh: 0.4,
     mie: 0.02,
-    sunIntensity: 0.9,
+    sunIntensity: 9,
     sunColor: "#e8ecf0",
     hemiSky: "#d8dde3",
     hemiGround: "#5f5c55",
     hemiIntensity: 1.1,
-    exposure: 0.5,
+    exposure: 1,
     fog: "#b9bec4",
     fogFalloff: 0.006,
     clouds: 0.85,
@@ -99,12 +109,12 @@ const SKY_PRESETS: Record<MapFile["environment"]["sky"]["preset"], SkyParams> = 
     turbidity: 6,
     rayleigh: 3,
     mie: 0.008,
-    sunIntensity: 1.2,
+    sunIntensity: 14,
     sunColor: "#ff9a62",
     hemiSky: "#8a8fbf",
     hemiGround: "#2e2a30",
     hemiIntensity: 0.5,
-    exposure: 0.55,
+    exposure: 1,
     fog: "#8c7f8f",
     fogFalloff: 0.016,
     clouds: 0.3,
@@ -117,6 +127,8 @@ export type GraphicsQuality = "low" | "medium" | "high"
 
 type QualityDef = {
   pixelRatio: number
+  /** MSAA samples on the scene buffer. SMAA alone can't resolve subpixel detail. */
+  msaa: number
   ao: "Performance" | "Low" | null
   /** Far edge of each shadow cascade, meters. The last one is the shadow distance. */
   cascades: number[]
@@ -127,6 +139,7 @@ type QualityDef = {
 const QUALITY: Record<GraphicsQuality, QualityDef> = {
   low: {
     pixelRatio: 1,
+    msaa: 0,
     ao: null,
     cascades: [25, 120],
     shadowSize: 1024,
@@ -134,6 +147,7 @@ const QUALITY: Record<GraphicsQuality, QualityDef> = {
   },
   medium: {
     pixelRatio: 1.5,
+    msaa: 2,
     ao: "Performance",
     cascades: [12, 50, 180],
     shadowSize: 1536,
@@ -141,6 +155,7 @@ const QUALITY: Record<GraphicsQuality, QualityDef> = {
   },
   high: {
     pixelRatio: 2,
+    msaa: 4,
     ao: "Low",
     cascades: [12, 55, 250],
     shadowSize: 2048,
@@ -167,6 +182,8 @@ export class SceneRenderer {
   private composer: EffectComposer
   private renderPass: RenderPass
   private ao: N8AOPostPass
+  private exposure = new AutoExposureEffect()
+  private cameraFx = new CameraEffect()
   private csm: CSM | null = null
   private camera: THREE.PerspectiveCamera = new THREE.PerspectiveCamera()
   private projKey = ""
@@ -202,9 +219,9 @@ export class SceneRenderer {
     this.composer.addPass(this.renderPass)
     this.ao = new N8AOPostPass(this.scene, this.camera, 1, 1)
     Object.assign(this.ao.configuration, {
-      aoRadius: 2.2,
+      aoRadius: 1.5,
       distanceFalloff: 1.2,
-      intensity: 2.4,
+      intensity: 1.8,
       halfRes: true,
       depthAwareUpsampling: true,
       transparencyAware: false,
@@ -212,17 +229,35 @@ export class SceneRenderer {
     })
     this.ao.configuration.color.set(0x000000)
     this.composer.addPass(this.ao)
+    // HDR: bloom from the raw image, then camera exposure, AgX, and a little
+    // contrast and saturation back since AgX is deliberately flat
     this.composer.addPass(
-      new EffectPass(this.camera, new ToneMappingEffect({ mode: ToneMappingMode.ACES_FILMIC })),
+      new EffectPass(
+        this.camera,
+        new BloomEffect({
+          mipmapBlur: true,
+          luminanceThreshold: 7,
+          luminanceSmoothing: 3,
+          intensity: 0.35,
+          radius: 0.7,
+        }),
+        this.exposure,
+        new ToneMappingEffect({ mode: ToneMappingMode.AGX }),
+        new BrightnessContrastEffect({ contrast: 0.1 }),
+        new HueSaturationEffect({ saturation: 0.18 }),
+      ),
     )
     // SMAA after tone mapping so edges are detected on display values
     this.composer.addPass(new EffectPass(this.camera, new SMAAEffect({ preset: SMAAPreset.HIGH })))
+    // Lens and sensor last, on the antialiased image
+    this.composer.addPass(new EffectPass(this.camera, this.cameraFx))
   }
 
   setQuality(name: GraphicsQuality) {
     const q = QUALITY[name] ?? QUALITY.medium
     this.quality = q
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, q.pixelRatio))
+    this.composer.multisampling = Math.min(q.msaa, this.renderer.capabilities.maxSamples)
     this.composer.setSize(this.size.w, this.size.h, false)
     this.ao.enabled = q.ao !== null
     if (q.ao) {
@@ -299,16 +334,19 @@ export class SceneRenderer {
     this.sun.color.set(p.sunColor)
     this.sun.intensity = p.sunIntensity * Math.min(1, Math.max(0.15, Math.sin(el) * 3))
     this.applySun()
+    // Sky light comes from the env map only. The hemisphere light stays as a
+    // faint fill so nothing in deep shade goes fully black.
     this.hemi.color.set(p.hemiSky)
     this.hemi.groundColor.set(p.hemiGround)
-    this.hemi.intensity = p.hemiIntensity
+    this.hemi.intensity = p.hemiIntensity * 0.15
     this.renderer.toneMappingExposure = p.exposure
+    this.exposure.reset()
 
     const fog = env.fog
     this.scene.fog = new THREE.FogExp2(fog?.color ?? p.fog, fog?.density ?? 0.0025)
     shared.dFogFalloff.value = p.fogFalloff
     shared.dSunDir.value.copy(this.sunDir)
-    shared.dSunColor.value.copy(this.sun.color).multiplyScalar(this.sun.intensity * 0.05)
+    shared.dSunColor.value.copy(this.sun.color).multiplyScalar(this.sun.intensity * 0.012)
     shared.dCloudShadow.value = p.cloudShadow * Math.min(1, p.clouds * 2)
 
     const wind = env.wind
@@ -326,7 +364,20 @@ export class SceneRenderer {
     cu.showSunDisc!.value = 0
     ;(skyCopy.material as THREE.ShaderMaterial).uniforms = cu
     envScene.add(skyCopy)
+    // Ground below the horizon, so the lower hemisphere bounces sunlit ground
+    // color instead of the sky shader's blue haze
+    const irr = (this.sun.intensity * Math.max(0.05, Math.sin(el))) / Math.PI + 0.25
+    const groundMat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(p.hemiGround).multiplyScalar(irr * 0.9),
+      side: THREE.DoubleSide,
+    })
+    const groundDisc = new THREE.Mesh(new THREE.CircleGeometry(900, 32), groundMat)
+    groundDisc.rotation.x = -Math.PI / 2
+    groundDisc.position.y = -2
+    envScene.add(groundDisc)
     this.envRT = this.pmrem.fromScene(envScene, 0, 0.1, 2000)
+    groundDisc.geometry.dispose()
+    groundMat.dispose()
     this.scene.environment = this.envRT.texture
     this.scene.environmentIntensity = 0.6
   }
@@ -371,7 +422,14 @@ export class SceneRenderer {
     this.grass?.update(camera, this.groundHeight, this.wind, drone, downwash)
   }
 
+  /** Lens, sensor and exposure behavior for the camera being rendered. */
+  setCameraFx(p: CameraFxParams, exposureStrength: number) {
+    this.cameraFx.set(p)
+    this.exposure.strength = exposureStrength
+  }
+
   render(camera: THREE.PerspectiveCamera, dt: number) {
+    this.cameraFx.track(camera, dt)
     if (camera !== this.camera) {
       this.camera = camera
       this.composer.setMainCamera(camera)

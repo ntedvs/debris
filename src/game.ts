@@ -2,6 +2,7 @@ import * as THREE from "three"
 import { getGamepad, KeyboardInput, readGamepad, type FrameInput } from "./input/input"
 import { buildMap, type BuiltMap } from "./map/builder"
 import type { MapFile } from "./map/schema"
+import { fisheyeLens, type Lens } from "./render/post"
 import { QuadModel } from "./render/quad-model"
 import { SceneRenderer } from "./render/scene"
 import { getQuad } from "./sim/quads"
@@ -48,6 +49,9 @@ export class Game {
   }
   private raf = 0
   private chasePos = new THREE.Vector3()
+  private lens: Lens | null = null
+  private camWorld = new THREE.Vector3()
+  private fxKey = ""
   private graphics: Settings["graphics"] | null = null
   paused = false
   onStatus: ((s: GameStatus) => void) | null = null
@@ -159,8 +163,14 @@ export class Game {
     const h = this.canvas.clientHeight || window.innerHeight
     this.renderer.resize(w, h)
     const aspect = w / h
-    const hfov = THREE.MathUtils.degToRad(settings.get().camera.fov ?? this.spec.camera.fov)
-    this.fpvCam.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(hfov / 2) / aspect))
+    const s = settings.get()
+    const hfovDeg = s.camera.fov ?? this.spec.camera.fov
+    // With camera effects the FPV view is a fisheye warp of a wider rectilinear render
+    this.lens = s.cameraEffects ? fisheyeLens(hfovDeg, aspect) : null
+    const hfov = THREE.MathUtils.degToRad(hfovDeg)
+    this.fpvCam.fov =
+      this.lens?.renderVFov ?? THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(hfov / 2) / aspect))
+    this.fxKey = ""
     this.fpvCam.aspect = aspect
     this.fpvCam.updateProjectionMatrix()
     this.extCam.aspect = aspect
@@ -228,10 +238,23 @@ export class Game {
       this.extCam.lookAt(st.position)
       cam = this.extCam
     }
+    const fx = settings.get().cameraEffects
+    const fxKey = `${view}:${fx}`
+    if (fxKey !== this.fxKey) {
+      this.fxKey = fxKey
+      const fpv = view === "fpv" && fx
+      this.renderer.setCameraFx(
+        fpv
+          ? { lens: this.lens, blur: true, ca: 0.006, vignette: 0.45, grain: 0.018 }
+          : { lens: null, blur: false, ca: 0, vignette: fx ? 0.2 : 0, grain: 0 },
+        fpv ? 0.75 : 0.5,
+      )
+    }
     // Downwash on the grass: total thrust relative to hover, only near the ground
     let thrust = 0
     for (const r of this.sim.dynamics.rotors) thrust += r.thrust
     const wash = Math.min(1.5, Math.max(0, thrust / (this.spec.frame.mass * 9.81)))
+    this.built?.update(cam.getWorldPosition(this.camWorld))
     this.renderer.update(dt, cam, st.position, wash)
     this.renderer.render(cam, dt)
 

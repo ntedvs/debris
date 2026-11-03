@@ -18,6 +18,8 @@ export type Settings = {
   /** Impacts never disarm the quad. */
   noCrash: boolean
   shadows: boolean
+  /** FPV lens distortion, motion blur, vignette and sensor noise. */
+  cameraEffects: boolean
   graphics: GraphicsQuality
   physicsRate: number
 }
@@ -35,6 +37,7 @@ const DEFAULTS: Settings = {
   crashThreshold: 14,
   noCrash: false,
   shadows: true,
+  cameraEffects: true,
   graphics: "medium",
   physicsRate: 1000,
 }
