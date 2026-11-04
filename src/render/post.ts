@@ -1,5 +1,5 @@
 import * as THREE from "three"
-import { Effect, EffectAttribute } from "postprocessing"
+import { Effect, EffectAttribute, LuminancePass, MipmapBlurPass } from "postprocessing"
 
 // ---------- lens ----------
 
@@ -197,10 +197,10 @@ uniform vec4 lens;      // k, gOut, tanIn, distortion on
 uniform mat3 reproj;    // current view dir -> view dir at shutter open
 uniform float blurOn;
 uniform float ca;
-uniform float vignette;
-uniform float grain;
 uniform float uTime;
 uniform vec2 uRes;
+uniform sampler2D bloomTex;
+uniform float bloomIntensity;
 
 float fxHash( vec2 p ) { return fract( sin( dot( p, vec2( 12.9898, 78.233 ) ) ) * 43758.5453 ); }
 
@@ -223,29 +223,75 @@ void mainImage( const in vec4 inputColor, const in vec2 uv, out vec4 outputColor
     if ( pd.z < -0.05 ) vel = ( pd.xy / ( -pd.z * lens.z ) - ip ) * vec2( 1.0, asp ) * 0.5;
   }
   float px = length( vel * uRes );
-  int n = int( clamp( ceil( px / 1.5 ), 1.0, 12.0 ) );
+  // One fetch per blur tap; samples spaced ~3 px apart and jittered, the
+  // grain hides the remaining noise
+  int n = int( clamp( ceil( px / 3.0 ), 1.0, 8.0 ) );
   float jit = fxHash( uv * uRes + fract( uTime ) * 61.0 );
   vec2 caOff = ( iuv - 0.5 ) * ca * r * r;
   vec3 acc = vec3( 0.0 );
-  for ( int i = 0; i < 12; i++ ) {
+  for ( int i = 0; i < 8; i++ ) {
     if ( i >= n ) break;
     vec2 s = iuv + vel * ( n > 1 ? ( float( i ) + jit ) / float( n ) : 0.0 );
-    acc.r += texture2D( inputBuffer, s + caOff ).r;
-    acc.g += texture2D( inputBuffer, s ).g;
-    acc.b += texture2D( inputBuffer, s - caOff ).b;
+    acc += texture2D( inputBuffer, s ).rgb;
   }
   vec3 col = acc / float( n );
+  // Lateral chromatic aberration: red and blue shifted, relative to green
+  if ( ca > 0.0 ) {
+    vec2 s = iuv + vel * ( n > 1 ? 0.5 : 0.0 );
+    vec3 c0 = n > 1 ? texture2D( inputBuffer, s ).rgb : col;
+    col.r += texture2D( inputBuffer, s + caOff ).r - c0.r;
+    col.b += texture2D( inputBuffer, s - caOff ).b - c0.b;
+    col = max( col, 0.0 );
+  }
+  // Bloom, through the same lens (screen blend)
+  vec3 b = texture2D( bloomTex, iuv ).rgb * bloomIntensity;
+  col = col + b - min( col * b, 1.0 );
+  outputColor = vec4( col, inputColor.a );
+}`
 
+const SENSOR_FRAG = /* glsl */ `
+uniform float vignette;
+uniform float grain;
+uniform float uTime;
+uniform vec2 uRes;
+
+float fxHash2( vec2 p ) { return fract( sin( dot( p, vec2( 12.9898, 78.233 ) ) ) * 43758.5453 ); }
+
+void mainImage( const in vec4 inputColor, const in vec2 uv, out vec4 outputColor ) {
+  float asp = uRes.x / uRes.y;
+  vec2 p = ( uv - 0.5 ) * 2.0 * vec2( 1.0, 1.0 / asp );
+  vec3 col = inputColor.rgb;
   // Optical vignetting toward the corners
-  float rc = r / length( vec2( 1.0, 1.0 / asp ) );
+  float rc = length( p ) / length( vec2( 1.0, 1.0 / asp ) );
   col *= 1.0 - vignette * pow( rc, 2.6 );
-
   // Sensor noise, stronger in the shadows
   float lum = dot( col, vec3( 0.2126, 0.7152, 0.0722 ) );
-  float g = fxHash( floor( uv * uRes ) + floor( uTime * 60.0 ) * 7.13 ) - 0.5;
+  float g = fxHash2( floor( uv * uRes ) + floor( uTime * 60.0 ) * 7.13 ) - 0.5;
   col += g * grain * ( 0.35 + 0.65 * ( 1.0 - smoothstep( 0.0, 0.5, lum ) ) );
   outputColor = vec4( max( col, 0.0 ), inputColor.a );
 }`
+
+/** Vignette and sensor noise, on the display referred image (after tone mapping). */
+export class SensorEffect extends Effect {
+  constructor() {
+    super("SensorEffect", SENSOR_FRAG, {
+      uniforms: new Map<string, THREE.Uniform>([
+        ["vignette", new THREE.Uniform(0)],
+        ["grain", new THREE.Uniform(0)],
+        ["uTime", new THREE.Uniform(0)],
+        ["uRes", new THREE.Uniform(new THREE.Vector2(1, 1))],
+      ]),
+    })
+  }
+
+  override update(_r: THREE.WebGLRenderer, _i: THREE.WebGLRenderTarget, dt = 0) {
+    this.uniforms.get("uTime")!.value += dt
+  }
+
+  override setSize(width: number, height: number) {
+    ;(this.uniforms.get("uRes")!.value as THREE.Vector2).set(width, height)
+  }
+}
 
 export type CameraFxParams = {
   lens: Lens | null
@@ -256,9 +302,10 @@ export type CameraFxParams = {
 }
 
 /**
- * Everything a real FPV camera does to the image, in one pass: fisheye
- * distortion of a wider rectilinear render, rotational motion blur over the
- * shutter, lateral chromatic aberration, vignetting and sensor noise.
+ * What an FPV camera's optics do to the (HDR) image: fisheye distortion of a
+ * wider rectilinear render, rotational motion blur over the shutter, lateral
+ * chromatic aberration, and bloom. Vignetting and sensor noise come later in
+ * the same pass, see `sensor`.
  */
 export class CameraEffect extends Effect {
   private prevQ = new THREE.Quaternion()
@@ -269,8 +316,17 @@ export class CameraEffect extends Effect {
   /** Shutter time, seconds. */
   shutter = 1 / 90
   private params: CameraFxParams = { lens: null, blur: false, ca: 0, vignette: 0, grain: 0 }
+  /** Add after tone mapping, in the same pass. */
+  readonly sensor = new SensorEffect()
+  private luminance: LuminancePass
+  private blur = new MipmapBlurPass()
 
-  constructor() {
+  constructor({
+    bloomThreshold = 7,
+    bloomSmoothing = 3,
+    bloomIntensity = 0.35,
+    bloomRadius = 0.7,
+  } = {}) {
     super("CameraEffect", CAMERA_FRAG, {
       attributes: EffectAttribute.CONVOLUTION,
       uniforms: new Map<string, THREE.Uniform>([
@@ -278,20 +334,34 @@ export class CameraEffect extends Effect {
         ["reproj", new THREE.Uniform(new THREE.Matrix3())],
         ["blurOn", new THREE.Uniform(0)],
         ["ca", new THREE.Uniform(0)],
-        ["vignette", new THREE.Uniform(0)],
-        ["grain", new THREE.Uniform(0)],
         ["uTime", new THREE.Uniform(0)],
         ["uRes", new THREE.Uniform(new THREE.Vector2(1, 1))],
+        ["bloomTex", new THREE.Uniform(null)],
+        ["bloomIntensity", new THREE.Uniform(bloomIntensity)],
       ]),
     })
+    // Bloom: HDR threshold and a mip chain blur, from a quarter resolution
+    // copy. It's a wide, soft glow; resolution buys nothing.
+    this.luminance = new LuminancePass({ colorOutput: true } as ConstructorParameters<
+      typeof LuminancePass
+    >[0])
+    const lm = this.luminance.fullscreenMaterial as unknown as {
+      threshold: number
+      smoothing: number
+    }
+    lm.threshold = bloomThreshold
+    lm.smoothing = bloomSmoothing
+    this.blur.radius = bloomRadius
+    this.blur.levels = 8
+    this.uniforms.get("bloomTex")!.value = this.blur.texture
   }
 
   set(p: CameraFxParams) {
     this.params = p
     const u = this.uniforms
     u.get("ca")!.value = p.ca
-    u.get("vignette")!.value = p.vignette
-    u.get("grain")!.value = p.grain
+    this.sensor.uniforms.get("vignette")!.value = p.vignette
+    this.sensor.uniforms.get("grain")!.value = p.grain
     const l = u.get("lens")!.value as THREE.Vector4
     if (p.lens) l.set(p.lens.k, p.lens.gOut, p.lens.tanIn, 1)
     else l.set(1, 1, 1, 0)
@@ -322,11 +392,29 @@ export class CameraEffect extends Effect {
     this.hasPrev = true
   }
 
-  override update(_r: THREE.WebGLRenderer, _i: THREE.WebGLRenderTarget, dt = 0) {
+  override update(renderer: THREE.WebGLRenderer, input: THREE.WebGLRenderTarget, dt = 0) {
     this.uniforms.get("uTime")!.value += dt
+    const lum = this.luminance as unknown as { renderTarget: THREE.WebGLRenderTarget }
+    this.luminance.render(renderer, input, null as unknown as THREE.WebGLRenderTarget)
+    this.blur.render(renderer, lum.renderTarget, null as unknown as THREE.WebGLRenderTarget)
+  }
+
+  override initialize(renderer: THREE.WebGLRenderer, alpha: boolean, frameBufferType: number) {
+    this.luminance.initialize(renderer, alpha, frameBufferType)
+    this.blur.initialize(renderer, alpha, frameBufferType)
   }
 
   override setSize(width: number, height: number) {
     ;(this.uniforms.get("uRes")!.value as THREE.Vector2).set(width, height)
+    const w = Math.max(1, Math.round(width / 4))
+    const h = Math.max(1, Math.round(height / 4))
+    this.luminance.setSize(w, h)
+    this.blur.setSize(w, h)
+  }
+
+  override dispose() {
+    super.dispose()
+    this.luminance.dispose()
+    this.blur.dispose()
   }
 }

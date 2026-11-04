@@ -175,12 +175,9 @@ export function terrainMaterial(data: GroundData) {
   const tex = layers.map(presetTextures)
   const defs = layers.map(presetDef)
   const uniforms = {
-    tMap0: { value: tex[0]!.map },
-    tMap1: { value: tex[1]!.map },
-    tMap2: { value: tex[2]!.map },
-    tH0: { value: tex[0]!.bump },
-    tH1: { value: tex[1]!.bump },
-    tH2: { value: tex[2]!.bump },
+    tMap0: { value: tex[0]!.packed },
+    tMap1: { value: tex[1]!.packed },
+    tMap2: { value: tex[2]!.packed },
     tMask: { value: data.mask },
     tTile: {
       value: new THREE.Vector3(1 / data.tile, 1 / defs[1]!.tileSize, 1 / defs[2]!.tileSize),
@@ -214,18 +211,27 @@ vTNormal = normalize( mat3( modelMatrix ) * objectNormal );`,
         .replace(
           "#include <common>",
           /* glsl */ `#include <common>
-uniform sampler2D tMap0, tMap1, tMap2, tH0, tH1, tH2, tMask;
+uniform sampler2D tMap0, tMap1, tMap2, tMask;
 uniform vec3 tTile, tRough, tBump, tTint;
 uniform vec2 tGround;
 varying vec3 vTWorld;
 varying vec3 vTNormal;
 float tHeight, tRoughness, tBumpScale;
 // Two rotated samples at different scales, blended by noise, hide tiling.
-vec3 tLayer(sampler2D cm, sampler2D hm, vec2 p, float tile, float b, out float h) {
+// Layers are packed: color in RGB, height in A.
+// Explicit gradients: some layers are fetched in branches.
+vec2 tDx, tDy;
+vec3 tLayer(sampler2D cm, vec2 p, float tile, float b, out float h) {
+  mat2 R = mat2(0.8, -0.6, 0.6, 0.8);
   vec2 uvA = p * tile;
-  vec2 uvB = mat2(0.8, -0.6, 0.6, 0.8) * p * tile * 0.37 + 0.31;
-  h = mix(texture(hm, uvA).r, texture(hm, uvB).r, b);
-  return mix(texture(cm, uvA).rgb, texture(cm, uvB).rgb, b);
+  vec2 uvB = R * p * tile * 0.37 + 0.31;
+  vec4 c = mix(
+    textureGrad(cm, uvA, tDx * tile, tDy * tile),
+    textureGrad(cm, uvB, R * tDx * tile * 0.37, R * tDy * tile * 0.37),
+    b
+  );
+  h = c.a;
+  return c.rgb;
 }
 vec3 tPerturb(vec3 pos, vec3 n, vec2 dHdxy, float faceDir) {
   vec3 sx = normalize(dFdx(pos));
@@ -242,21 +248,24 @@ vec3 tPerturb(vec3 pos, vec3 n, vec2 dHdxy, float faceDir) {
           "#include <map_fragment>",
           /* glsl */ `{
   vec2 tp = vTWorld.xz;
+  tDx = dFdx(tp);
+  tDy = dFdy(tp);
   vec2 msk = texture(tMask, tp * tGround.y + 0.5).rg;
   float slope = 1.0 - clamp(normalize(vTNormal).y, 0.0, 1.0);
   float fd, fr; vec4 nz;
   tCover(tp, msk, slope, fd, fr, nz);
   float tb = smoothstep(0.3, 0.7, texture(dNoise, tp / 29.0).g);
-  float h0, h1, h2;
-  vec3 c0 = tLayer(tMap0, tH0, tp, tTile.x, tb, h0);
-  vec3 c2 = tLayer(tMap2, tH2, tp, tTile.z, tb, h2);
+  float h0, h1 = 0.0, h2 = 0.0;
+  vec3 c0 = tLayer(tMap0, tp, tTile.x, tb, h0);
   float macro = 0.84 + 0.32 * nz.a;
   #ifdef TERRAIN_SPLAT
-    vec3 c1 = tLayer(tMap1, tH1, tp, tTile.y, tb, h1);
     float dry = smoothstep(0.35, 0.85, nz.r);
     c0 *= mix(vec3(0.86, 1.04, 0.84), vec3(1.22, 1.08, 0.72), dry);
-    // Height-aware blend so dirt shows between grass tufts first
-    fd = smoothstep(0.4, 0.6, fd + (h1 - h0) * 0.35);
+    // Height-aware blend so dirt shows between grass tufts first. Heights are
+    // 0..1, so below 0.05 the dirt weight is zero and its fetch is skipped.
+    vec3 c1 = vec3(0.0);
+    if (fd > 0.05) c1 = tLayer(tMap1, tp, tTile.y, tb, h1);
+    fd = fd > 0.05 ? smoothstep(0.4, 0.6, fd + (h1 - h0) * 0.35) : 0.0;
     vec3 col = mix(c0, c1, fd);
     float hh = mix(h0, h1, fd);
   #else
@@ -264,7 +273,10 @@ vec3 tPerturb(vec3 pos, vec3 n, vec2 dHdxy, float faceDir) {
     vec3 col = c0;
     float hh = h0;
   #endif
-  fr = smoothstep(0.4, 0.6, fr + (h2 - hh) * 0.3);
+  // Same for rock on flat ground
+  vec3 c2 = vec3(0.0);
+  if (fr > 0.1) c2 = tLayer(tMap2, tp, tTile.z, tb, h2);
+  fr = fr > 0.1 ? smoothstep(0.4, 0.6, fr + (h2 - hh) * 0.3) : 0.0;
   col = mix(col * macro, c2 * (0.9 + 0.2 * nz.g), fr);
   tHeight = mix(hh, h2, fr);
   tRoughness = mix(mix(tRough.x, tRough.y, fd), tRough.z, fr);

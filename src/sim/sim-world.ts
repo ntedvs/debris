@@ -44,6 +44,47 @@ export type Telemetry = {
 
 const GRAVITY = 9.81
 
+type WorldInternals = {
+  physicsPipeline: { step(...args: unknown[]): void }
+  gravity: unknown
+  integrationParameters: unknown
+  islands: unknown
+  broadPhase: unknown
+  narrowPhase: unknown
+  bodies: unknown
+  colliders: unknown
+  softBodies: unknown
+  impulseJoints: unknown
+  multibodyJoints: unknown
+  ccdSolver: unknown
+}
+
+/**
+ * `world.step()` without the bookkeeping after it: Rapier's JS wrapper walks
+ * every collider and body handle after each step to wrap ones created inside
+ * WASM. Nothing is ever created that way here (everything goes through
+ * createCollider/createRigidBody, which wrap immediately), and with a few
+ * hundred static colliders at 1 kHz that walk was most of the sim's cost.
+ */
+function stepWorld(world: RAPIER.World) {
+  const w = world as unknown as WorldInternals
+  w.physicsPipeline.step(
+    w.gravity,
+    w.integrationParameters,
+    w.islands,
+    w.broadPhase,
+    w.narrowPhase,
+    w.bodies,
+    w.colliders,
+    w.softBodies,
+    w.impulseJoints,
+    w.multibodyJoints,
+    w.ccdSolver,
+    undefined,
+    undefined,
+  )
+}
+
 export class SimWorld {
   readonly world: RAPIER.World
   readonly body: RAPIER.RigidBody
@@ -216,7 +257,7 @@ export class SimWorld {
       .add(this.vPrev)
     this.predicted.y -= GRAVITY * this.dt
 
-    this.world.step()
+    stepWorld(this.world)
 
     const v = this.body.linvel()
     const impact = Math.hypot(

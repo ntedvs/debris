@@ -1,24 +1,23 @@
 import * as THREE from "three"
-import { CSM } from "three/examples/jsm/csm/CSM.js"
 import { Sky } from "three/examples/jsm/objects/Sky.js"
 import {
-  BloomEffect,
   BrightnessContrastEffect,
   EffectComposer,
   EffectPass,
   HueSaturationEffect,
   RenderPass,
-  SMAAEffect,
-  SMAAPreset,
   ToneMappingEffect,
   ToneMappingMode,
 } from "postprocessing"
-import { N8AOPostPass } from "n8ao"
 import type { BuiltMap } from "../map/builder"
 import type { MapFile } from "../map/schema"
 import { noiseTexture } from "./noise-texture"
 import { AutoExposureEffect, CameraEffect, type CameraFxParams } from "./post"
-import { installChunks, invalidateMaterials, patchTree, setCascadeCount, shared } from "./shading"
+import { CascadedShadows } from "./shadows"
+import { SkyCache } from "./sky"
+import { TAAPass } from "./taa"
+import { AOPass } from "./ao"
+import { installChunks, invalidateMaterials, patchTree, shared } from "./shading"
 import { GrassField, type GrassQuality } from "./terrain"
 
 type SkyParams = {
@@ -127,10 +126,10 @@ export type GraphicsQuality = "low" | "medium" | "high"
 
 type QualityDef = {
   pixelRatio: number
-  /** MSAA samples on the scene buffer. SMAA alone can't resolve subpixel detail. */
-  msaa: number
-  ao: "Performance" | "Low" | null
-  /** Far edge of each shadow cascade, meters. The last one is the shadow distance. */
+  /** Scene resolution relative to output; TAA upsamples. */
+  renderScale: number
+  ao: boolean
+  /** Coverage radius of each shadow cascade around the camera, meters. The last one is the shadow distance. */
   cascades: number[]
   shadowSize: number
   grass: GrassQuality
@@ -139,24 +138,24 @@ type QualityDef = {
 const QUALITY: Record<GraphicsQuality, QualityDef> = {
   low: {
     pixelRatio: 1,
-    msaa: 0,
-    ao: null,
+    renderScale: 0.8,
+    ao: false,
     cascades: [25, 120],
     shadowSize: 1024,
     grass: { near: { spacing: 0.28, radius: 12 }, far: { spacing: 0.85, radius: 30 } },
   },
   medium: {
     pixelRatio: 1.5,
-    msaa: 2,
-    ao: "Performance",
+    renderScale: 0.75,
+    ao: true,
     cascades: [12, 50, 180],
     shadowSize: 1536,
     grass: { near: { spacing: 0.2, radius: 14 }, far: { spacing: 0.6, radius: 42 } },
   },
   high: {
     pixelRatio: 2,
-    msaa: 4,
-    ao: "Low",
+    renderScale: 0.67,
+    ao: true,
     cascades: [12, 55, 250],
     shadowSize: 2048,
     grass: { near: { spacing: 0.16, radius: 16 }, far: { spacing: 0.45, radius: 55 } },
@@ -166,33 +165,38 @@ const QUALITY: Record<GraphicsQuality, QualityDef> = {
 /**
  * Renderer, sky, lighting, shadows and post. Map geometry gets added to `scene`.
  *
- * Pipeline: scene (linear HDR, half float) -> N8AO -> tone mapping -> SMAA.
- * Shadows are 2-3 cascades fitted to the active camera. Fog is height based
- * and colored from the prefiltered sky, see shading.ts.
+ * Pipeline: scene (linear HDR, half float, jittered, below output resolution)
+ * -> AO (half of that) -> TAA (applies AO, upsamples to output resolution)
+ * -> one post pass: lens, bloom, exposure, AgX, grade, sensor noise.
+ *
+ * Shadows are 2-3 cached cascades around the camera, see shadows.ts. The sky
+ * is cached in a cube map, see sky.ts. Fog is height based and colored from
+ * the prefiltered sky, see shading.ts.
  */
 export class SceneRenderer {
   readonly renderer: THREE.WebGLRenderer
   readonly scene = new THREE.Scene()
   readonly hemi = new THREE.HemisphereLight()
-  private sky = new Sky()
+  private sky = new SkyCache()
   private pmrem: THREE.PMREMGenerator
   private envRT: THREE.WebGLRenderTarget | null = null
   private sunDir = new THREE.Vector3(0, 1, 0)
   private sun = { color: new THREE.Color(), intensity: 0 }
   private composer: EffectComposer
   private renderPass: RenderPass
-  private ao: N8AOPostPass
+  private ao = new AOPass()
+  private taa = new TAAPass()
   private exposure = new AutoExposureEffect()
   private cameraFx = new CameraEffect()
-  private csm: CSM | null = null
+  private shadows: CascadedShadows | null = null
   private camera: THREE.PerspectiveCamera = new THREE.PerspectiveCamera()
-  private projKey = ""
   private quality: QualityDef = QUALITY.medium
   private grass: GrassField | null = null
   private groundHeight: (x: number, z: number) => number = () => 0
   private wind = new THREE.Vector2()
   private windSpeed = 0
   private size = { w: 1, h: 1 }
+  private camPos = new THREE.Vector3()
 
   constructor(readonly canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -210,60 +214,40 @@ export class SceneRenderer {
     this.pmrem = new THREE.PMREMGenerator(this.renderer)
     shared.dNoise.value = noiseTexture()
 
-    this.sky.scale.setScalar(45000)
-    this.scene.add(this.sky)
+    this.scene.add(this.sky.mesh)
     this.scene.add(this.hemi)
 
     this.composer = new EffectComposer(this.renderer, { frameBufferType: THREE.HalfFloatType })
     this.renderPass = new RenderPass(this.scene, this.camera)
     this.composer.addPass(this.renderPass)
-    this.ao = new N8AOPostPass(this.scene, this.camera, 1, 1)
-    Object.assign(this.ao.configuration, {
-      aoRadius: 1.5,
-      distanceFalloff: 1.2,
-      intensity: 1.8,
-      halfRes: true,
-      depthAwareUpsampling: true,
-      transparencyAware: false,
-      gammaCorrection: false,
-    })
-    this.ao.configuration.color.set(0x000000)
     this.composer.addPass(this.ao)
-    // HDR: bloom from the raw image, then camera exposure, AgX, and a little
-    // contrast and saturation back since AgX is deliberately flat
-    this.composer.addPass(
-      new EffectPass(
-        this.camera,
-        new BloomEffect({
-          mipmapBlur: true,
-          luminanceThreshold: 7,
-          luminanceSmoothing: 3,
-          intensity: 0.35,
-          radius: 0.7,
-        }),
-        this.exposure,
-        new ToneMappingEffect({ mode: ToneMappingMode.AGX }),
-        new BrightnessContrastEffect({ contrast: 0.1 }),
-        new HueSaturationEffect({ saturation: 0.18 }),
-      ),
+    // Antialiasing and upsampling on the HDR image, before bloom so it doesn't flicker
+    this.composer.addPass(this.taa)
+    // One pass at output resolution: lens (distortion, motion blur, CA,
+    // bloom) on the HDR image, then exposure, AgX, a little contrast and
+    // saturation back since AgX is deliberately flat, then sensor noise.
+    // Runs from inside the TAA pass, see TAAPass.chain.
+    const post = new EffectPass(
+      this.camera,
+      this.cameraFx,
+      this.exposure,
+      new ToneMappingEffect({ mode: ToneMappingMode.AGX }),
+      new BrightnessContrastEffect({ contrast: 0.1 }),
+      new HueSaturationEffect({ saturation: 0.18 }),
+      this.cameraFx.sensor,
     )
-    // SMAA after tone mapping so edges are detected on display values
-    this.composer.addPass(new EffectPass(this.camera, new SMAAEffect({ preset: SMAAPreset.HIGH })))
-    // Lens and sensor last, on the antialiased image
-    this.composer.addPass(new EffectPass(this.camera, this.cameraFx))
+    post.enabled = false
+    this.composer.addPass(post)
+    this.taa.chain = [post]
   }
 
   setQuality(name: GraphicsQuality) {
     const q = QUALITY[name] ?? QUALITY.medium
     this.quality = q
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, q.pixelRatio))
-    this.composer.multisampling = Math.min(q.msaa, this.renderer.capabilities.maxSamples)
-    this.composer.setSize(this.size.w, this.size.h, false)
-    this.ao.enabled = q.ao !== null
-    if (q.ao) {
-      this.ao.setQualityMode(q.ao)
-      this.ao.configuration.halfRes = true
-    }
+    this.applySize()
+    this.ao.enabled = q.ao
+    this.taa.setAO(q.ao ? this.ao.target.texture : null)
     this.buildShadows()
     this.grass?.setQuality(q.grass)
     patchTree(this.scene)
@@ -271,43 +255,14 @@ export class SceneRenderer {
 
   private buildShadows() {
     const q = this.quality
-    if (this.csm) {
-      this.csm.remove()
-      for (const l of this.csm.lights) l.shadow.map?.dispose()
-    }
-    setCascadeCount(q.cascades.length)
-    const maxFar = q.cascades[q.cascades.length - 1]!
-    this.csm = new CSM({
-      camera: this.camera,
-      parent: this.scene,
-      cascades: q.cascades.length,
-      maxFar,
-      mode: "custom",
-      customSplitsCallback: (_n, _near, far, breaks) => {
-        for (const d of q.cascades) breaks.push(Math.min(1, d / far))
-      },
-      shadowMapSize: q.shadowSize,
-      lightDirection: this.sunDir.clone().negate(),
-      lightIntensity: this.sun.intensity,
-      lightNear: 1,
-      lightFar: 1500,
-      lightMargin: 250,
-      shadowBias: -0.00015,
-    })
-    this.csm.fade = true
-    // CSM injects its stock light chunks on construction; put ours back
-    installChunks(true)
+    this.shadows?.dispose()
+    installChunks()
+    this.shadows = new CascadedShadows(this.scene, q.cascades, q.shadowSize)
     this.applySun()
-    this.projKey = ""
   }
 
   private applySun() {
-    if (!this.csm) return
-    this.csm.lightDirection.copy(this.sunDir).negate()
-    for (const l of this.csm.lights) {
-      l.color.copy(this.sun.color)
-      l.intensity = this.sun.intensity
-    }
+    this.shadows?.setSun(this.sunDir, this.sun.color, this.sun.intensity)
   }
 
   applyEnvironment(env: MapFile["environment"]) {
@@ -315,7 +270,8 @@ export class SceneRenderer {
     if (env.sky.sunElevation !== undefined) p.elevation = env.sky.sunElevation
     if (env.sky.sunAzimuth !== undefined) p.azimuth = env.sky.sunAzimuth
 
-    const u = this.sky.material.uniforms
+    const u = this.sky.uniforms
+    this.sky.invalidate()
     u.turbidity!.value = p.turbidity
     u.rayleigh!.value = p.rayleigh
     u.mieCoefficient!.value = p.mie
@@ -391,6 +347,7 @@ export class SceneRenderer {
     this.grass.setQuality(this.quality.grass)
     this.scene.add(this.grass.group)
     this.groundHeight = built.groundHeight
+    this.shadows?.invalidate()
   }
 
   /** Hook any newly added objects into the shared shading. */
@@ -401,25 +358,46 @@ export class SceneRenderer {
   setShadows(enabled: boolean) {
     if (this.renderer.shadowMap.enabled === enabled) return
     this.renderer.shadowMap.enabled = enabled
+    this.shadows?.invalidate()
     invalidateMaterials()
   }
 
   resize(width: number, height: number) {
     this.size = { w: width, h: height }
-    this.composer.setSize(width, height, false)
-    this.projKey = ""
+    this.applySize()
+  }
+
+  /** Canvas at output resolution, scene buffers at render resolution. */
+  private applySize() {
+    const c = this.composer as EffectComposer & {
+      inputBuffer: THREE.WebGLRenderTarget
+      outputBuffer: THREE.WebGLRenderTarget
+      depthRenderTarget: THREE.WebGLRenderTarget | null
+    }
+    c.setSize(this.size.w, this.size.h, false)
+    const out = this.renderer.getDrawingBufferSize(new THREE.Vector2())
+    const rw = Math.max(1, Math.round(out.x * this.quality.renderScale))
+    const rh = Math.max(1, Math.round(out.y * this.quality.renderScale))
+    c.inputBuffer.setSize(rw, rh)
+    c.outputBuffer.setSize(rw, rh)
+    c.depthRenderTarget?.setSize(rw, rh)
+    this.renderPass.setSize(rw, rh)
+    this.ao.setSize(rw, rh)
+    this.taa.setSizes(rw, rh, out.x, out.y)
   }
 
   /** Per-frame animation: clouds, wind, grass and downwash from the quad. */
   update(dt: number, camera: THREE.Camera, drone: THREE.Vector3, downwash: number) {
     shared.dTime.value += dt
-    this.sky.material.uniforms.time!.value = shared.dTime.value
+    shared.dFrame.value = (shared.dFrame.value + 1) % 64
+    this.sky.uniforms.time!.value = shared.dTime.value
     // Clouds drift with the wind aloft
     const aloft = this.windSpeed * 2.5 + 3
     const len = this.wind.length() || 1
     shared.dCloudOffset.value.x += (this.wind.x / len) * aloft * dt * shared.dCloudScale.value
     shared.dCloudOffset.value.y += (this.wind.y / len) * aloft * dt * shared.dCloudScale.value
     this.grass?.update(camera, this.groundHeight, this.wind, drone, downwash)
+    shared.dDrone.value.set(drone.x, drone.y, drone.z, 0.14)
   }
 
   /** Lens, sensor and exposure behavior for the camera being rendered. */
@@ -433,30 +411,18 @@ export class SceneRenderer {
     if (camera !== this.camera) {
       this.camera = camera
       this.composer.setMainCamera(camera)
-      this.ao.camera = camera
-      this.projKey = ""
+      this.ao.mainCam = camera
     }
-    const csm = this.csm
-    if (csm) {
-      // Fit cascades to this frame's camera, not last frame's
-      camera.updateWorldMatrix(true, false)
-      const key = `${camera.fov}:${camera.aspect}:${camera.near}`
-      if (key !== this.projKey) {
-        this.projKey = key
-        csm.camera = camera
-        csm.updateFrustums()
-        const v = shared.CSM_cascades.value
-        csm.breaks.forEach((b, i) => v[i]?.set(csm.breaks[i - 1] ?? 0, b))
-        shared.cameraNear.value = camera.near
-        shared.shadowFar.value = Math.min(camera.far, csm.maxFar)
-        // Normal offset scaled to each cascade's texel size kills acne without peter panning
-        for (const l of csm.lights) {
-          const c = l.shadow.camera
-          l.shadow.normalBias = ((c.right - c.left) / csm.shadowMapSize) * 1.5
-        }
-      }
-      csm.update()
-    }
+    camera.updateWorldMatrix(true, false)
+    this.shadows?.update(camera.getWorldPosition(this.camPos))
+    this.sky.update(this.renderer)
+    this.taa.jitter(camera)
     this.composer.render(dt)
+    this.taa.restore(camera)
+  }
+
+  /** Forget temporal history, e.g. after a teleport. */
+  resetHistory() {
+    this.taa.reset()
   }
 }

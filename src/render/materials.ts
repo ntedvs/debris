@@ -219,7 +219,13 @@ const PRESETS: Record<string, PresetDef> = {
   },
 }
 
-const textureCache = new Map<string, { map: THREE.CanvasTexture; bump: THREE.CanvasTexture }>()
+type PresetTextures = {
+  map: THREE.CanvasTexture
+  bump: THREE.CanvasTexture
+  /** Color in RGB, height in A: one fetch for both (terrain). */
+  packed: THREE.DataTexture
+}
+const textureCache = new Map<string, PresetTextures>()
 
 export function presetTextures(name: string) {
   let t = textureCache.get(name)
@@ -251,11 +257,25 @@ export function presetTextures(name: string) {
   const map = new THREE.CanvasTexture(color)
   map.colorSpace = THREE.SRGBColorSpace
   const bump = new THREE.CanvasTexture(height)
-  for (const tex of [map, bump]) {
+  const pd = new Uint8Array(SIZE * SIZE * 4)
+  for (let i = 0; i < SIZE * SIZE; i++) {
+    pd[i * 4] = cimg.data[i * 4]!
+    pd[i * 4 + 1] = cimg.data[i * 4 + 1]!
+    pd[i * 4 + 2] = cimg.data[i * 4 + 2]!
+    pd[i * 4 + 3] = himg.data[i * 4]!
+  }
+  const packed = new THREE.DataTexture(pd, SIZE, SIZE, THREE.RGBAFormat, THREE.UnsignedByteType)
+  packed.colorSpace = THREE.SRGBColorSpace
+  packed.flipY = true
+  packed.generateMipmaps = true
+  packed.minFilter = THREE.LinearMipmapLinearFilter
+  packed.magFilter = THREE.LinearFilter
+  packed.needsUpdate = true
+  for (const tex of [map, bump, packed]) {
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping
     tex.anisotropy = 8
   }
-  t = { map, bump }
+  t = { map, bump, packed }
   textureCache.set(name, t)
   return t
 }

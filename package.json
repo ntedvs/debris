@@ -6,15 +6,15 @@
     "dev": "bun schema && vite",
     "build": "bun schema && vite build",
     "preview": "vite preview",
-    "schema": "bun scripts/gen-schema.ts"
+    "schema": "bun scripts/gen-schema.ts",
+    "bench": "bun bench/run.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.21.0",
-    "n8ao": "2.0.1",
     "postprocessing": "6.39.6",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "three": "0.186.1",
+    "three": "0.187.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
@@ -22,8 +22,9 @@
     "@types/bun": "1.4.4",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
-    "@types/three": "0.186.0",
+    "@types/three": "0.187.0",
     "@vitejs/plugin-react": "6.2.1",
+    "playwright": "1.64.1",
     "tailwindcss": "4.3.4",
     "typescript": "7.0.2",
     "vite": "8.3.5"

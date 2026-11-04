@@ -455,8 +455,10 @@ function leafTexture(kind: "broad" | "needle") {
 const SWAY = /* glsl */ `
 #include <begin_vertex>
 {
-  #ifdef USE_INSTANCING
+  #if defined( USE_INSTANCING )
   vec3 vegRoot = instanceMatrix[3].xyz;
+  #elif defined( USE_BATCHING )
+  vec3 vegRoot = batchingMatrix[3].xyz;
   #else
   vec3 vegRoot = vec3( 0.0 );
   #endif
@@ -535,9 +537,9 @@ export function leafMaterial(species: Species, color: string) {
   m = new THREE.MeshStandardMaterial({
     map,
     color,
+    // Binary cutout; TAA resolves the edges. (Alpha to coverage needs MSAA,
+    // which the pipeline doesn't use.)
     alphaTest: 0.5,
-    // Soft, stable leaf edges under MSAA instead of a crawling binary cutout
-    alphaToCoverage: true,
     side: THREE.DoubleSide,
     shadowSide: THREE.DoubleSide,
     roughness: 0.78,

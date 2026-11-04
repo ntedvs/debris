@@ -33,6 +33,8 @@ type GeoDesc =
   | { kind: "ring"; r: number; tube: number }
   | { kind: "veg"; species: Species; variant: number; lod: number; layer: "bark" | "leaves" }
 
+type VegBatch = "bark" | "broad" | "needle"
+
 type Part = {
   geo: GeoDesc
   material: THREE.Material
@@ -46,6 +48,8 @@ type Part = {
   footprint?: boolean
   /** Low detail geometry drawn beyond LOD_DISTANCE. */
   far?: GeoDesc
+  /** Vegetation: which shared batch it draws in, and its tint there. */
+  veg?: { batch: VegBatch; color: THREE.Color }
 }
 
 export type BuiltMap = {
@@ -224,17 +228,26 @@ function prefabParts(obj: Extract<MapObject, { type: "prefab" }>, m: THREE.Matri
         lod,
         layer,
       })
-      const visual = (layer: "bark" | "leaves", material: THREE.Material) =>
+      const visual = (layer: "bark" | "leaves", material: THREE.Material, color = "#ffffff") =>
         ctx.parts.push({
           geo: veg(layer, 0),
           far: veg(layer, 1),
+          veg: {
+            batch: layer === "bark" ? "bark" : species === "pine" ? "needle" : "broad",
+            color: new THREE.Color(color),
+          },
           material,
           matrix: m.clone(),
           collide: false,
           footprint: false,
         })
       if (species !== "bush") visual("bark", barkMaterial())
-      visual("leaves", leafMaterial(species, obj.color ?? palette[variant % palette.length]!))
+      // One shared material per leaf texture; the tint is per instance
+      visual(
+        "leaves",
+        leafMaterial(species === "pine" ? "pine" : "tree", "#ffffff"),
+        obj.color ?? palette[variant % palette.length]!,
+      )
       // Invisible collision: trunk cylinder and a ball per crown
       const hidden = (geo: GeoDesc, local: THREE.Matrix4, collider?: "ball") =>
         ctx.parts.push({
@@ -578,13 +591,16 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     string,
     { geo: THREE.BufferGeometry; mat: THREE.Material; matrices: THREE.Matrix4[] }
   >()
-  const lodBatches = new Map<
-    string,
+  const vegBatches = new Map<
+    VegBatch,
     {
-      near: THREE.BufferGeometry
-      far: THREE.BufferGeometry
       mat: THREE.Material
-      matrices: THREE.Matrix4[]
+      items: {
+        near: THREE.BufferGeometry
+        far: THREE.BufferGeometry
+        matrix: THREE.Matrix4
+        color: THREE.Color
+      }[]
     }
   >()
   const tmpPos = new THREE.Vector3()
@@ -621,17 +637,13 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
         part.material = decalMaterial(part.material)
     }
 
-    if (part.far) {
+    if (part.far && part.veg) {
       const fk = JSON.stringify(part.far)
-      const lk = `${gk}|${fk}|${part.material.uuid}`
-      let lb = lodBatches.get(lk)
-      if (!lb) {
-        let far = geoCache.get(fk)
-        if (!far) geoCache.set(fk, (far = buildGeometry(part.far)))
-        lb = { near: geo, far, mat: part.material, matrices: [] }
-        lodBatches.set(lk, lb)
-      }
-      lb.matrices.push(part.matrix)
+      let far = geoCache.get(fk)
+      if (!far) geoCache.set(fk, (far = buildGeometry(part.far)))
+      let vb = vegBatches.get(part.veg.batch)
+      if (!vb) vegBatches.set(part.veg.batch, (vb = { mat: part.material, items: [] }))
+      vb.items.push({ near: geo, far, matrix: part.matrix, color: part.veg.color })
     } else if (!part.hidden) {
       const bk = `${gk}|${part.material.uuid}`
       let batch = batches.get(bk)
@@ -737,27 +749,36 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     drawCalls++
   }
 
-  // LOD sets: one near and one far instanced mesh each, instances moved
-  // between them as the camera moves. Cheaper than per-chunk meshes.
-  const lods = [...lodBatches.values()].map((b) => {
-    const make = (geo: THREE.BufferGeometry) => {
-      const inst = new THREE.InstancedMesh(geo, b.mat, b.matrices.length)
-      inst.count = 0
-      inst.frustumCulled = false
-      inst.castShadow = true
-      inst.receiveShadow = true
-      const depth = b.mat.userData.depthMaterial as THREE.Material | undefined
-      if (depth) inst.customDepthMaterial = depth
-      group.add(inst)
-      drawCalls++
-      return inst
-    }
+  // Vegetation: one batched mesh per material (bark, broad leaves, needles)
+  // holding every variant and LOD. One multi-draw each, culled per instance,
+  // so the camera and every shadow cascade only draw the trees they see.
+  const lods = [...vegBatches.values()].map((b) => {
+    const geos = [...new Set(b.items.flatMap((it) => [it.near, it.far]))]
+    const verts = geos.reduce((n, g) => n + g.getAttribute("position").count, 0)
+    const idx = geos.reduce((n, g) => n + (g.getIndex()?.count ?? 0), 0)
+    const mesh = new THREE.BatchedMesh(b.items.length, verts, idx, b.mat)
+    const ids = new Map(geos.map((g) => [g, mesh.addGeometry(g)]))
+    const inst = b.items.map((it) => {
+      const id = mesh.addInstance(ids.get(it.far)!)
+      mesh.setMatrixAt(id, it.matrix)
+      mesh.setColorAt(id, it.color)
+      return id
+    })
+    mesh.frustumCulled = false
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    const depth = b.mat.userData.depthMaterial as THREE.Material | undefined
+    if (depth) mesh.customDepthMaterial = depth
+    group.add(mesh)
+    drawCalls++
     return {
-      near: make(b.near),
-      far: make(b.far),
-      matrices: b.matrices,
-      pos: b.matrices.map((mm) => new THREE.Vector3().setFromMatrixPosition(mm)),
-      range: b.matrices.map((mm) => LOD_DISTANCE * Math.max(1, mm.getMaxScaleOnAxis())),
+      mesh,
+      inst,
+      near: b.items.map((it) => ids.get(it.near)!),
+      far: b.items.map((it) => ids.get(it.far)!),
+      isNear: b.items.map(() => false),
+      pos: b.items.map((it) => new THREE.Vector3().setFromMatrixPosition(it.matrix)),
+      range: b.items.map((it) => LOD_DISTANCE * Math.max(1, it.matrix.getMaxScaleOnAxis())),
     }
   })
   const lastCam = new THREE.Vector3(Infinity, 0, 0)
@@ -765,17 +786,13 @@ export function buildMap(map: MapFile, rapier: R, world: RAPIER.World): BuiltMap
     if (cam.distanceToSquared(lastCam) < 4) return
     lastCam.copy(cam)
     for (const l of lods) {
-      let ni = 0
-      let fi = 0
       for (let i = 0; i < l.pos.length; i++) {
         const r = l.range[i]!
-        if (l.pos[i]!.distanceToSquared(cam) < r * r) l.near.setMatrixAt(ni++, l.matrices[i]!)
-        else l.far.setMatrixAt(fi++, l.matrices[i]!)
+        const near = l.pos[i]!.distanceToSquared(cam) < r * r
+        if (near === l.isNear[i]) continue
+        l.isNear[i] = near
+        l.mesh.setGeometryIdAt(l.inst[i]!, near ? l.near[i]! : l.far[i]!)
       }
-      l.near.count = ni
-      l.far.count = fi
-      l.near.instanceMatrix.needsUpdate = true
-      l.far.instanceMatrix.needsUpdate = true
     }
   }
 

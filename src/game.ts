@@ -21,8 +21,8 @@ export type GameStatus = Telemetry & {
 const VIEWS: ViewMode[] = ["fpv", "chase", "los"]
 
 export class Game {
-  private renderer!: SceneRenderer
-  private sim!: SimWorld
+  renderer!: SceneRenderer
+  sim!: SimWorld
   private spec!: QuadSpec
   private model!: QuadModel
   private built: BuiltMap | null = null
@@ -54,11 +54,14 @@ export class Game {
   private fxKey = ""
   private graphics: Settings["graphics"] | null = null
   paused = false
+  /** Last frame's CPU cost, ms. */
+  readonly timings = { sim: 0, render: 0 }
   onStatus: ((s: GameStatus) => void) | null = null
 
   constructor(private canvas: HTMLCanvasElement) {}
 
-  async init(map: MapFile) {
+  /** `loop: false` skips the rAF loop so a harness can drive `tick` itself. */
+  async init(map: MapFile, { loop = true } = {}) {
     await initPhysics()
     this.renderer = new SceneRenderer(this.canvas)
     this.graphics = settings.get().graphics
@@ -69,6 +72,7 @@ export class Game {
     window.addEventListener("resize", this.resize)
     window.addEventListener("keydown", this.onKey)
     this.resize()
+    if (!loop) return
     this.last = performance.now()
     this.raf = requestAnimationFrame(this.frame)
   }
@@ -95,7 +99,8 @@ export class Game {
     if (this.built) {
       this.renderer.scene.remove(this.built.group)
       this.built.group.traverse((o) => {
-        if (o instanceof THREE.Mesh) o.geometry.dispose()
+        if (o instanceof THREE.BatchedMesh) o.dispose()
+        else if (o instanceof THREE.Mesh) o.geometry.dispose()
       })
       this.built.ground.mask.dispose()
       this.built.ground.height.dispose()
@@ -139,6 +144,7 @@ export class Game {
     if (spawn) this.sim.setSpawn(spawn)
     this.sim.reset()
     this.chasePos.set(0, 0, 0)
+    this.renderer.resetHistory()
   }
 
   nextSpawn() {
@@ -188,8 +194,12 @@ export class Game {
     this.raf = requestAnimationFrame(this.frame)
     const dt = Math.min(0.1, (now - this.last) / 1000)
     this.last = now
+    this.tick(dt, this.readInput(dt))
+  }
 
-    const input = this.readInput(dt)
+  /** Advance the sim by `dt` seconds with `input` and render one frame. */
+  tick(dt: number, input: FrameInput) {
+    const t0 = performance.now()
     this.lastInput = input
     if (input.reset && !this.prevReset) this.reset()
     this.prevReset = input.reset
@@ -205,6 +215,7 @@ export class Game {
       }
       if (n === 100) this.acc = 0
     }
+    const t1 = performance.now()
 
     const st = this.sim.state
     this.model.root.position.copy(st.position)
@@ -257,6 +268,8 @@ export class Game {
     this.built?.update(cam.getWorldPosition(this.camWorld))
     this.renderer.update(dt, cam, st.position, wash)
     this.renderer.render(cam, dt)
+    this.timings.sim = t1 - t0
+    this.timings.render = performance.now() - t1
 
     this.frames++
     this.fpsTimer += dt

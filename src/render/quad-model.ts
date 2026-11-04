@@ -33,7 +33,7 @@ export class QuadModel {
     ) => {
       const m = new THREE.Mesh(geo, mat)
       m.position.copy(pos)
-      m.castShadow = true
+      m.castShadow = false
       parent.add(m)
       return m
     }
