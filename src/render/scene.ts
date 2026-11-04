@@ -124,6 +124,22 @@ const SKY_PRESETS: Record<MapFile["environment"]["sky"]["preset"], SkyParams> = 
 
 export type GraphicsQuality = "low" | "medium" | "high"
 
+/**
+ * Contrast pushes near-black below zero, and the sRGB to linear conversion
+ * postprocessing runs next turns negative values into NaN (pow of a negative),
+ * which displays as white. Clamp the output.
+ */
+function contrastEffect(contrast: number) {
+  const e = new BrightnessContrastEffect({ contrast })
+  const src = e.getFragmentShader()
+  const from = "outputColor=vec4(color+vec3(0.5),inputColor.a);"
+  if (!src.includes(from)) throw new Error("BrightnessContrastEffect shader changed")
+  ;(e as unknown as { setFragmentShader(s: string): void }).setFragmentShader(
+    src.replace(from, "outputColor=vec4(max(color+vec3(0.5),0.0),inputColor.a);"),
+  )
+  return e
+}
+
 type QualityDef = {
   pixelRatio: number
   /** Scene resolution relative to output; TAA upsamples. */
@@ -232,7 +248,7 @@ export class SceneRenderer {
       this.cameraFx,
       this.exposure,
       new ToneMappingEffect({ mode: ToneMappingMode.AGX }),
-      new BrightnessContrastEffect({ contrast: 0.1 }),
+      contrastEffect(0.1),
       new HueSaturationEffect({ saturation: 0.18 }),
       this.cameraFx.sensor,
     )
